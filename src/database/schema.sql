@@ -1,5 +1,9 @@
 -- Schema do banco de dados gestor-ml360
 
+CREATE SEQUENCE IF NOT EXISTS seq_historico_ratings START 1;
+CREATE SEQUENCE IF NOT EXISTS seq_jogadores_reais START 1;
+CREATE SEQUENCE IF NOT EXISTS seq_analises_scouting START 1;
+
 CREATE TABLE IF NOT EXISTS jogadores_jogo (
     sofifa_id       VARCHAR PRIMARY KEY,
     nome            VARCHAR NOT NULL,
@@ -13,55 +17,49 @@ CREATE TABLE IF NOT EXISTS jogadores_jogo (
     nacionalidade   VARCHAR,
     valor_eur       BIGINT,
     salario_eur     INTEGER,
-    -- Atributos físicos
     altura_cm       INTEGER,
     peso_kg         INTEGER,
     pe_preferido    VARCHAR,
     skill_moves     INTEGER,
     weak_foot       INTEGER,
-    -- Atributos técnicos
     ritmo           INTEGER,
     finalizacao     INTEGER,
     passe           INTEGER,
     drible          INTEGER,
     defesa          INTEGER,
     fisico          INTEGER,
-    -- Controle
     versao_jogo     VARCHAR,
     data_coleta     TIMESTAMP DEFAULT current_timestamp,
     patch_versao    VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS historico_ratings (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER DEFAULT nextval('seq_historico_ratings') PRIMARY KEY,
     sofifa_id       VARCHAR NOT NULL,
     overall         INTEGER,
     potencial       INTEGER,
     versao_jogo     VARCHAR,
     data_registro   TIMESTAMP DEFAULT current_timestamp,
-    variacao        INTEGER  -- diferença em relação ao registro anterior
+    variacao        INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS jogadores_reais (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER DEFAULT nextval('seq_jogadores_reais') PRIMARY KEY,
     nome            VARCHAR NOT NULL,
+    nome_normalizado VARCHAR,
     time            VARCHAR,
     liga            VARCHAR,
     temporada       VARCHAR,
-    -- Stats padrão
     partidas        INTEGER,
     minutos         INTEGER,
     gols            INTEGER,
     assistencias    INTEGER,
-    -- xG / xA
     xg              DOUBLE,
     xa              DOUBLE,
     xg_por_90       DOUBLE,
     xa_por_90       DOUBLE,
-    -- Progressão
     progressive_carries INTEGER,
     progressive_passes  INTEGER,
-    -- Controle
     data_coleta     TIMESTAMP DEFAULT current_timestamp,
     fonte           VARCHAR DEFAULT 'fbref'
 );
@@ -76,9 +74,9 @@ CREATE TABLE IF NOT EXISTS mapeamento_jogadores (
 );
 
 CREATE TABLE IF NOT EXISTS analises_scouting (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER DEFAULT nextval('seq_analises_scouting') PRIMARY KEY,
     sofifa_id       VARCHAR,
-    tipo_analise    VARCHAR,  -- 'promessa', 'subvalorizado', 'upgrade_esperado'
+    tipo_analise    VARCHAR,
     score           DOUBLE,
     justificativa   VARCHAR,
     data_analise    TIMESTAMP DEFAULT current_timestamp

@@ -1,96 +1,118 @@
 """
-Coletor de dados reais de desempenho via FBref (usando a biblioteca soccerdata).
-Coleta estatísticas como gols, assistências, xG, xA, pressões, etc.
+Coletor de dados reais de desempenho via FBref.
+Usa pandas.read_html() para ler as tabelas HTML do site.
 """
+import time
 import pandas as pd
-import soccerdata as sd
+import requests
 from pathlib import Path
 from config.settings import RAW_DIR
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+# IDs das ligas no FBref
 LIGAS_FBREF = {
-    "premier_league": "ENG-Premier League",
-    "la_liga": "ESP-La Liga",
-    "bundesliga": "GER-Bundesliga",
-    "serie_a": "ITA-Serie A",
-    "ligue_1": "FRA-Ligue 1",
-    "brasileiro": "BRA-Brasileirao",
+    "premier_league":  9,
+    "la_liga":         12,
+    "bundesliga":      20,
+    "serie_a":         11,
+    "ligue_1":         13,
+    "brasileiro":      24,
+}
+
+# Tipos de stats disponíveis no FBref
+STAT_TYPES = {
+    "standard":  "stats",
+    "shooting":  "shooting",
+    "passing":   "passing",
+    "defense":   "defense",
+    "possession": "possession",
 }
 
 TEMPORADA_ATUAL = "2025-2026"
 
 
-def coletar_stats_jogadores(liga: str, temporada: str = TEMPORADA_ATUAL) -> pd.DataFrame:
+def _url_liga(liga_id: int, stat: str, temporada: str) -> str:
+    ano_inicio, ano_fim = temporada.split("-")
+    return (
+        f"https://fbref.com/en/comps/{liga_id}/{ano_inicio}-{ano_fim[-2:]}/"
+        f"{stat}/{ano_inicio}-{ano_fim[-2:]}-stats"
+    )
+
+
+def _ler_tabela_fbref(url: str) -> pd.DataFrame | None:
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        time.sleep(4)  # respeitar rate limit do FBref
+
+        tabelas = pd.read_html(resp.text, header=[0, 1])
+        for df in tabelas:
+            # A tabela de jogadores tem coluna "Player"
+            if "Player" in df.columns.get_level_values(-1):
+                df.columns = [
+                    "_".join(str(c) for c in col).strip("_").lower().replace(" ", "_")
+                    if isinstance(col, tuple) else str(col).lower()
+                    for col in df.columns
+                ]
+                df = df[df.get("unnamed:_1_level_0_player", df.get("player", pd.Series())) != "Player"]
+                df = df.dropna(how="all")
+                return df
+    except Exception as e:
+        print(f"Erro ao ler {url}: {e}")
+    return None
+
+
+def coletar_stats_liga(
+    liga: str,
+    stat_type: str = "standard",
+    temporada: str = TEMPORADA_ATUAL,
+) -> pd.DataFrame | None:
     """
-    Coleta estatísticas padrão dos jogadores de uma liga via FBref.
+    Coleta estatísticas de uma liga e tipo de stat específico do FBref.
 
     Args:
         liga: chave da liga (ex: 'premier_league')
+        stat_type: tipo de stat ('standard', 'shooting', 'passing', 'defense', 'possession')
         temporada: temporada no formato '2025-2026'
 
     Returns:
-        DataFrame com as estatísticas dos jogadores
+        DataFrame com as estatísticas ou None se falhar
     """
-    nome_liga = LIGAS_FBREF.get(liga)
-    if not nome_liga:
+    liga_id = LIGAS_FBREF.get(liga)
+    if not liga_id:
         raise ValueError(f"Liga '{liga}' não encontrada. Disponíveis: {list(LIGAS_FBREF)}")
 
-    fbref = sd.FBref(leagues=nome_liga, seasons=temporada)
-    df = fbref.read_player_season_stats(stat_type="standard")
-    df = df.reset_index()
+    stat_path = STAT_TYPES.get(stat_type, stat_type)
+    url = _url_liga(liga_id, stat_path, temporada)
+    print(f"Coletando {liga} - {stat_type}: {url}")
+
+    df = _ler_tabela_fbref(url)
+    if df is not None:
+        df["liga"] = liga
+        df["temporada"] = temporada
+        df["stat_type"] = stat_type
     return df
 
 
-def coletar_stats_avancadas(liga: str, temporada: str = TEMPORADA_ATUAL) -> pd.DataFrame:
+def coletar_todas_ligas(
+    stat_type: str = "standard",
+    temporada: str = TEMPORADA_ATUAL,
+) -> pd.DataFrame:
     """
-    Coleta stats avançadas: xG, xA, progressive carries/passes.
-    """
-    nome_liga = LIGAS_FBREF.get(liga)
-    if not nome_liga:
-        raise ValueError(f"Liga '{liga}' não encontrada.")
-
-    fbref = sd.FBref(leagues=nome_liga, seasons=temporada)
-
-    stats = {}
-    for stat_type in ["shooting", "passing", "goal_shot_creation", "defense", "possession"]:
-        try:
-            df = fbref.read_player_season_stats(stat_type=stat_type)
-            stats[stat_type] = df.reset_index()
-        except Exception as e:
-            print(f"Aviso: não foi possível coletar '{stat_type}': {e}")
-
-    if not stats:
-        return pd.DataFrame()
-
-    base = stats.get("shooting", list(stats.values())[0])
-    colunas_chave = ["player", "team", "season"]
-
-    for stat_type, df in stats.items():
-        if stat_type == "shooting":
-            continue
-        colunas_extras = [c for c in df.columns if c not in base.columns or c in colunas_chave]
-        base = base.merge(
-            df[[c for c in colunas_chave if c in df.columns] + colunas_extras],
-            on=[c for c in colunas_chave if c in base.columns and c in df.columns],
-            how="left",
-            suffixes=("", f"_{stat_type}"),
-        )
-
-    return base
-
-
-def coletar_todas_ligas(temporada: str = TEMPORADA_ATUAL) -> pd.DataFrame:
-    """
-    Coleta estatísticas padrão de todas as ligas configuradas.
+    Coleta estatísticas de todas as ligas configuradas.
     """
     dfs = []
     for liga in LIGAS_FBREF:
-        try:
-            print(f"Coletando {liga}...")
-            df = coletar_stats_jogadores(liga, temporada)
-            df["liga"] = liga
+        df = coletar_stats_liga(liga, stat_type, temporada)
+        if df is not None and len(df) > 0:
             dfs.append(df)
-        except Exception as e:
-            print(f"Erro ao coletar {liga}: {e}")
+            print(f"  {liga}: {len(df)} jogadores")
 
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
@@ -105,5 +127,5 @@ def salvar_csv(df: pd.DataFrame, nome_arquivo: str) -> Path:
 
 if __name__ == "__main__":
     df = coletar_todas_ligas()
-    print(f"Jogadores coletados: {len(df)}")
+    print(f"\nTotal: {len(df)} registros")
     salvar_csv(df, "fbref_stats.csv")

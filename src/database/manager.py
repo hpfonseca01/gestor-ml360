@@ -9,6 +9,9 @@ from config.settings import DB_PATH
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
+# Colunas com DEFAULT no schema (não precisam ser inseridas explicitamente)
+COLUNAS_AUTO = {"data_coleta", "id"}
+
 
 class DBManager:
     def __init__(self, db_path: Path = DB_PATH):
@@ -17,8 +20,19 @@ class DBManager:
         self._inicializar_schema()
 
     def _inicializar_schema(self):
-        schema_sql = SCHEMA_PATH.read_text()
-        self.conn.execute(schema_sql)
+        self.conn.execute(SCHEMA_PATH.read_text())
+
+    def _colunas_tabela(self, tabela: str) -> list[str]:
+        result = self.conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            [tabela],
+        ).fetchall()
+        return [r[0] for r in result if r[0] not in COLUNAS_AUTO]
+
+    def _filtrar_df(self, df: pd.DataFrame, tabela: str) -> pd.DataFrame:
+        colunas_validas = self._colunas_tabela(tabela)
+        colunas = [c for c in df.columns if c in colunas_validas]
+        return df[colunas].copy() if colunas else df.copy()
 
     def inserir_jogadores_jogo(self, df: pd.DataFrame, patch_versao: str = None):
         """
@@ -29,17 +43,16 @@ class DBManager:
         if patch_versao:
             df["patch_versao"] = patch_versao
 
+        # Registrar histórico de variações antes de atualizar
         for _, row in df.iterrows():
             sofifa_id = row.get("sofifa_id")
             if not sofifa_id:
                 continue
-
             atual = self.conn.execute(
                 "SELECT overall FROM jogadores_jogo WHERE sofifa_id = ?", [sofifa_id]
             ).fetchone()
-
             if atual:
-                variacao = int(row.get("overall", 0) or 0) - int(atual[0] or 0)
+                variacao = int(row.get("overall") or 0) - int(atual[0] or 0)
                 self.conn.execute(
                     """
                     INSERT INTO historico_ratings (sofifa_id, overall, potencial, versao_jogo, variacao)
@@ -49,27 +62,29 @@ class DBManager:
                      row.get("versao_jogo"), variacao],
                 )
 
-        colunas = [c for c in df.columns if c in self._colunas_tabela("jogadores_jogo")]
-        df_filtrado = df[colunas] if colunas else df
+        df_ins = self._filtrar_df(df, "jogadores_jogo")
 
+        # DuckDB upsert: DELETE + INSERT para garantir consistência
+        ids = df_ins["sofifa_id"].dropna().tolist()
+        if ids:
+            placeholders = ", ".join(["?"] * len(ids))
+            self.conn.execute(
+                f"DELETE FROM jogadores_jogo WHERE sofifa_id IN ({placeholders})", ids
+            )
+
+        colunas = ", ".join(df_ins.columns)
         self.conn.execute(
-            "INSERT OR REPLACE INTO jogadores_jogo SELECT * FROM df_filtrado"
+            f"INSERT INTO jogadores_jogo ({colunas}) SELECT {colunas} FROM df_ins"
         )
-        print(f"{len(df_filtrado)} jogadores inseridos/atualizados.")
+        print(f"{len(df_ins)} jogadores inseridos/atualizados.")
 
     def inserir_jogadores_reais(self, df: pd.DataFrame):
-        colunas = [c for c in df.columns if c in self._colunas_tabela("jogadores_reais")]
-        df_filtrado = df[colunas] if colunas else df
+        df_ins = self._filtrar_df(df, "jogadores_reais")
+        colunas = ", ".join(df_ins.columns)
         self.conn.execute(
-            "INSERT INTO jogadores_reais SELECT * FROM df_filtrado"
+            f"INSERT INTO jogadores_reais ({colunas}) SELECT {colunas} FROM df_ins"
         )
-        print(f"{len(df_filtrado)} registros de stats reais inseridos.")
-
-    def _colunas_tabela(self, tabela: str) -> list[str]:
-        result = self.conn.execute(
-            f"SELECT column_name FROM information_schema.columns WHERE table_name = '{tabela}'"
-        ).fetchall()
-        return [r[0] for r in result]
+        print(f"{len(df_ins)} registros de stats reais inseridos.")
 
     def buscar_jogadores(
         self,
@@ -100,9 +115,9 @@ class DBManager:
             params.append(posicao)
 
         where = f"WHERE {' AND '.join(condicoes)}" if condicoes else ""
-        query = f"SELECT * FROM jogadores_jogo {where} ORDER BY overall DESC"
-
-        return self.conn.execute(query, params).df()
+        return self.conn.execute(
+            f"SELECT * FROM jogadores_jogo {where} ORDER BY overall DESC", params
+        ).df()
 
     def historico_jogador(self, sofifa_id: str) -> pd.DataFrame:
         return self.conn.execute(
@@ -111,7 +126,6 @@ class DBManager:
         ).df()
 
     def jogadores_com_upgrade(self, min_variacao: int = 1) -> pd.DataFrame:
-        """Retorna jogadores que tiveram upgrade recente."""
         return self.conn.execute(
             """
             SELECT h.sofifa_id, j.nome, j.posicao, j.liga, j.time,
